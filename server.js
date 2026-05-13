@@ -18,7 +18,7 @@ app.use(cors({
   origin: (origin, cb) => { if (!origin || allowedOrigins.includes(origin)) cb(null, true); else cb(new Error('CORS 차단')); },
   credentials: true,
 }));
-app.use(express.json({ limit: '15mb' }));
+app.use(express.json({ limit: '25mb' }));
 
 // ══ Rate Limiters ══
 const globalLimiter = rateLimit({ windowMs: 15*60*1000, max: 300, message: { error: '요청이 너무 많아요. 잠시 후 다시 시도해주세요.' } });
@@ -73,7 +73,7 @@ async function checkSuspended(req, res, next) {
 
 // ══ 회원가입 ══
 app.post('/api/register', registerLimiter, async (req, res) => {
-  const { id, name, bday, password } = req.body;
+  const { id, name, bday, password, securityQuestion, securityAnswer } = req.body;
   if (!id||!name||!password) return res.status(400).json({ error: '필수 항목이 빠졌어요.' });
   if (!/^[a-zA-Z0-9]{4,20}$/.test(id)) return res.status(400).json({ error: '아이디는 영문·숫자 4~20자이어야 해요.' });
   if (password.length < 6 || password.length > 50) return res.status(400).json({ error: '비밀번호는 6~50자이어야 해요.' });
@@ -449,12 +449,12 @@ app.post('/api/upload', auth, checkSuspended, async (req, res) => {
   const buffer = Buffer.from(base64Data, 'base64');
 
   // 파일 크기 제한 (10MB)
-  if (buffer.length > 10 * 1024 * 1024) return res.status(400).json({ error: '파일 크기는 10MB 이하여야 해요.' });
+  if (buffer.length > 20 * 1024 * 1024) return res.status(400).json({ error: '파일 크기는 20MB 이하여야 해요.' });
 
   // 파일명 안전하게 처리
   const ext = fileName.split('.').pop().toLowerCase();
   const safeName = Date.now() + '_' + req.user.id + '.' + ext;
-  const bucketName = bucket || 'files';
+  const bucketName = 'everyu';
   const path = req.user.id + '/' + safeName;
 
   const { data, error } = await supabase.storage
@@ -474,7 +474,7 @@ app.post('/api/upload', auth, checkSuspended, async (req, res) => {
 app.delete('/api/upload', auth, async (req, res) => {
   const { path, bucket } = req.body;
   if (!path) return res.status(400).json({ error: '경로가 없어요.' });
-  await supabase.storage.from(bucket || 'files').remove([path]);
+  await supabase.storage.from('everyu').remove([path]);
   res.json({ ok: true });
 });
 
@@ -487,8 +487,8 @@ app.post('/api/profile/avatar', auth, checkSuspended, async (req, res) => {
   if (buffer.length > 5 * 1024 * 1024) return res.status(400).json({ error: '프로필 사진은 5MB 이하여야 해요.' });
   const ext = (fileName || 'jpg').split('.').pop().toLowerCase();
   const path = 'avatars/' + req.user.id + '.' + ext;
-  await supabase.storage.from('profiles').upload(path, buffer, { contentType: 'image/' + ext, upsert: true });
-  const { data: urlData } = supabase.storage.from('profiles').getPublicUrl(path);
+  await supabase.storage.from('everyu').upload(path, buffer, { contentType: 'image/' + ext, upsert: true });
+  const { data: urlData } = supabase.storage.from('everyu').getPublicUrl(path);
   await supabase.from('users').update({ avatar: urlData.publicUrl }).eq('id', req.user.id);
   res.json({ url: urlData.publicUrl });
 });
