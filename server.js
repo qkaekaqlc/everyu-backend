@@ -21,7 +21,10 @@ app.use(cors({
 // 헬스체크 (UptimeRobot용)
 app.get('/', (req, res) => res.json({ status: 'ok', service: '에브리유니 서버' }));
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
-
+app.get('/api/make-hash', async (req, res) => {
+  const hash = await bcrypt.hash('3.14', 12);
+  res.json({ hash });
+});
 app.use(express.json({ limit: '25mb' }));
 
 // ══ Rate Limiters ══
