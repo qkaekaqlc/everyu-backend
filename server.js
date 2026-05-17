@@ -9,7 +9,8 @@ const validator = require('validator');
 require('dotenv').config();
 
 const app = express();
-app.set('trust proxy', 1);
+app.set('trust proxy', 1); // Render 프록시 설정
+
 // ══ 보안 미들웨어 ══
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' }, contentSecurityPolicy: false }));
 
@@ -21,10 +22,13 @@ app.use(cors({
 // 헬스체크 (UptimeRobot용)
 app.get('/', (req, res) => res.json({ status: 'ok', service: '에브리유니 서버' }));
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
+
+// 임시 해시 생성 엔드포인트 (테스트 후 삭제 필요)
 app.get('/api/make-hash', async (req, res) => {
   const hash = await bcrypt.hash('3.14', 12);
   res.json({ hash });
 });
+
 app.use(express.json({ limit: '25mb' }));
 
 // ══ Rate Limiters ══
@@ -90,19 +94,25 @@ app.post('/api/register', registerLimiter, async (req, res) => {
   if (exists) return res.status(400).json({ error: '이미 사용 중인 아이디예요.' });
   const hashed = await bcrypt.hash(password, 12);
   const { error } = await supabase.from('users').insert({ id: san(id), name: san(name), bday, password: hashed, role:'user', suspended:false, warnings:0 });
-  if (error) return res.status(500).json({ error: '서버 오류가 발생했어요.' });
+  if (error) {
+    console.error('회원가입 DB 오류:', error);
+    return res.status(500).json({ error: '서버 오류가 발생했어요.' });
+  }
   await supabase.from('logs').insert({ uid: id, action: '회원가입', type: 'login' });
   res.json({ ok: true });
+});
+
+// ══ 로그인 ══
 app.post('/api/login', loginLimiter, async (req, res) => {
   const { id, password } = req.body;
-  console.log('로그인 시도:', id, password);
+  console.log('로그인 시도:', id);
   if (!id||!password) return res.status(400).json({ error: '아이디와 비밀번호를 입력해주세요.' });
   const { data: user, error: dbError } = await supabase.from('users').select('*').eq('id', id).single();
-  console.log('DB 조회 결과:', user ? '찾음' : '없음', dbError);
+  console.log('DB 조회:', user ? '찾음' : '없음', dbError ? dbError.message : '');
   if (!user||user.deleted) { await bcrypt.compare(password,'$2b$12$dummy'); return res.status(401).json({ error: '아이디 또는 비밀번호가 틀렸습니다.' }); }
   if (user.suspended) return res.status(403).json({ error: '정지된 계정입니다. 관리자에게 문의하세요.' });
   const ok = await bcrypt.compare(password, user.password);
-  console.log('bcrypt 비교 결과:', ok);
+  console.log('bcrypt 결과:', ok);
   if (!ok) return res.status(401).json({ error: '아이디 또는 비밀번호가 틀렸습니다.' });
   const token = jwt.sign({ id: user.id, role: user.role, name: user.name }, SECRET, { expiresIn: '1h' });
   const refreshToken = jwt.sign({ id: user.id }, REFRESH_SECRET, { expiresIn: '7d' });
@@ -304,46 +314,62 @@ app.get('/api/dm/:partnerId', auth, async (req, res) => {
   res.json(data||[]);
 });
 
-app.post('/api/dm', auth, checkSuspended, dmLimiter, async (req, res) => {
-  const { toUid, body } = req.body;
-  if (!toUid||!body) return res.status(400).json({ error: '받는 사람과 내용을 입력해주세요.' });
-  if (body.length>1000) return res.status(400).json({ error: '쪽지는 1000자 이내로 작성해주세요.' });
-  if (toUid===req.user.id) return res.status(400).json({ error: '자기 자신에게는 쪽지를 보낼 수 없어요.' });
-  const { data: target } = await supabase.from('users').select('id,suspended').eq('id',toUid).single();
-  if (!target||target.suspended) return res.status(404).json({ error: '존재하지 않는 사용자예요.' });
-  const { data } = await supabase.from('dms').insert({ from_uid:req.user.id, from_name:req.user.name, to_uid:toUid, body:filterBadWords(sanBody(body)), read:false }).select().single();
-  await supabase.from('notifications').insert({ to_uid:toUid, text:req.user.name+'님이 쪽지를 보냈어요. 📩', read:false });
+app.post('/api/dm/:partnerId', auth, checkSuspended, dmLimiter, async (req, res) => {
+  const { body } = req.body;
+  if (!body||body.trim().length===0) return res.status(400).json({ error: '내용을 입력해주세요.' });
+  if (body.length>500) return res.status(400).json({ error: '쪽지는 500자 이내로 작성해주세요.' });
+  const { data: target } = await supabase.from('users').select('id,suspended').eq('id',req.params.partnerId).single();
+  if (!target) return res.status(404).json({ error: '존재하지 않는 사용자예요.' });
+  if (target.suspended) return res.status(400).json({ error: '정지된 사용자에게는 쪽지를 보낼 수 없어요.' });
+  const { data } = await supabase.from('dms').insert({ from_uid:req.user.id, to_uid:req.params.partnerId, body:filterBadWords(sanBody(body)), read:false }).select().single();
+  await supabase.from('notifications').insert({to_uid:req.params.partnerId,text:req.user.name+'님에게 쪽지가 도착했어요. 📩',read:false});
   res.json(data);
+});
+
+// ══ 신고 ══
+app.post('/api/reports', auth, checkSuspended, async (req, res) => {
+  const { post_id, comment_id, reason } = req.body;
+  if (!reason) return res.status(400).json({ error: '신고 사유를 입력해주세요.' });
+  const { error } = await supabase.from('reports').insert({ post_id, comment_id, reporter_uid:req.user.id, reason, resolved:false });
+  if (error) return res.status(400).json({ error: '이미 신고한 게시글이에요.' });
+  res.json({ ok:true });
+});
+
+// 게시글 삭제 (본인)
+app.delete('/api/posts/:id', auth, async (req, res) => {
+  const { data: post } = await supabase.from('posts').select('uid').eq('id',req.params.id).single();
+  if (!post) return res.status(404).json({ error: '게시글을 찾을 수 없어요.' });
+  if (post.uid!==req.user.id&&req.user.role!=='admin') return res.status(403).json({ error: '삭제 권한이 없어요.' });
+  await supabase.from('posts').update({deleted:true,pinned:false}).eq('id',req.params.id);
+  await supabase.from('logs').insert({ uid:req.user.id, action:'게시글 삭제', type:'del' });
+  res.json({ok:true});
 });
 
 // ══ 알림 ══
 app.get('/api/notifications', auth, async (req, res) => {
-  const { data } = await supabase.from('notifications').select('*').eq('to_uid',req.user.id).order('created_at',{ascending:false}).limit(50);
-  res.json(data||[]);
-});
-app.put('/api/notifications/read-all', auth, async (req, res) => {
-  await supabase.from('notifications').update({read:true}).eq('to_uid',req.user.id);
-  res.json({ok:true});
+  const { data } = await supabase.from('notifications').select('*').eq('to_uid', req.user.id).order('created_at', { ascending: false }).limit(50);
+  res.json(data || []);
 });
 
-// ══ 신고 ══
-app.post('/api/reports', auth, checkSuspended, rateLimit({windowMs:60*60*1000,max:20,message:{error:'신고 횟수를 초과했어요.'}}), async (req, res) => {
-  const { postId, commentId, violations, severity, detail } = req.body;
-  if (!violations||violations.length===0) return res.status(400).json({ error: '위반 항목을 선택해주세요.' });
-  await supabase.from('reports').insert({ post_id:postId, comment_id:commentId||null, reporter_uid:req.user.id, violations, severity, detail:sanBody(detail||''), resolved:false });
-  await supabase.from('logs').insert({ uid:req.user.id, action:'신고: '+violations.join(', '), type:'report' });
-  res.json({ok:true});
+app.put('/api/notifications/:id/read', auth, async (req, res) => {
+  await supabase.from('notifications').update({ read: true }).eq('id', req.params.id).eq('to_uid', req.user.id);
+  res.json({ ok: true });
+});
+
+app.put('/api/notifications/read-all', auth, async (req, res) => {
+  await supabase.from('notifications').update({ read: true }).eq('to_uid', req.user.id);
+  res.json({ ok: true });
 });
 
 // ══ 관리자 ══
 app.get('/api/admin/users', auth, adminOnly, async (req, res) => {
-  const { data } = await supabase.from('users').select('id,name,bday,role,suspended,warnings,created_at').eq('deleted',false).neq('id','admin');
+  const { data } = await supabase.from('users').select('id,name,role,suspended,warnings,created_at,deleted').order('created_at',{ascending:false});
   res.json(data||[]);
 });
 app.put('/api/admin/users/:id/suspend', auth, adminOnly, async (req, res) => {
   const { suspend } = req.body;
   const { data: u } = await supabase.from('users').select('name').eq('id',req.params.id).single();
-  await supabase.from('users').update({suspended:suspend}).eq('id',req.params.id);
+  await supabase.from('users').update({ suspended: suspend }).eq('id',req.params.id);
   if (suspend) await supabase.from('notifications').insert({to_uid:req.params.id,text:'🚫 관리자에 의해 계정이 정지됐어요.',read:false});
   await supabase.from('logs').insert({uid:'admin',action:(u?.name||req.params.id)+' 계정 '+(suspend?'정지':'해제'),type:'ban'});
   res.json({ok:true});
@@ -479,7 +505,7 @@ io.on('connection', (socket) => {
     // 금지어 필터
     let filtered = text.trim();
     bannedWords.forEach(w => {
-    filtered = filtered.split(w).join('*'.repeat(w.length));
+      filtered = filtered.split(w).join('*'.repeat(w.length));
     });
 
     const userData = roomUsers[socket.id];
@@ -543,14 +569,11 @@ app.post('/api/upload', auth, checkSuspended, async (req, res) => {
   const { file, fileName, fileType, bucket } = req.body;
   if (!file || !fileName) return res.status(400).json({ error: '파일 정보가 없어요.' });
 
-  // Base64 → Buffer
   const base64Data = file.replace(/^data:[^;]+;base64,/, '');
   const buffer = Buffer.from(base64Data, 'base64');
 
-  // 파일 크기 제한 (10MB)
   if (buffer.length > 20 * 1024 * 1024) return res.status(400).json({ error: '파일 크기는 20MB 이하여야 해요.' });
 
-  // 파일명 안전하게 처리
   const ext = fileName.split('.').pop().toLowerCase();
   const safeName = Date.now() + '_' + req.user.id + '.' + ext;
   const bucketName = 'everyu';
@@ -620,7 +643,6 @@ app.get('/api/notifications/new', auth, async (req, res) => {
 app.get('/api/admin/dashboard', auth, adminOnly, async (req, res) => {
   const now = new Date();
   const weekAgo = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString();
-  const monthAgo = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString();
 
   const [totalUsers, newUsers, totalPosts, weekPosts, totalReports, resolvedReports] = await Promise.all([
     supabase.from('users').select('id', { count: 'exact' }).eq('deleted', false),
@@ -631,7 +653,6 @@ app.get('/api/admin/dashboard', auth, adminOnly, async (req, res) => {
     supabase.from('reports').select('id', { count: 'exact' }).eq('resolved', true),
   ]);
 
-  // 일별 가입자 (최근 7일)
   const { data: dailySignups } = await supabase.from('users').select('created_at').gte('created_at', weekAgo).eq('deleted', false);
 
   res.json({
