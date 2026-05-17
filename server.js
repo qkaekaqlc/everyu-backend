@@ -9,7 +9,7 @@ const validator = require('validator');
 require('dotenv').config();
 
 const app = express();
-
+app.set('trust proxy', 1);
 // ══ 보안 미들웨어 ══
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' }, contentSecurityPolicy: false }));
 
