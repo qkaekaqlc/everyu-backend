@@ -93,16 +93,16 @@ app.post('/api/register', registerLimiter, async (req, res) => {
   if (error) return res.status(500).json({ error: '서버 오류가 발생했어요.' });
   await supabase.from('logs').insert({ uid: id, action: '회원가입', type: 'login' });
   res.json({ ok: true });
-});
-
-// ══ 로그인 ══
 app.post('/api/login', loginLimiter, async (req, res) => {
   const { id, password } = req.body;
+  console.log('로그인 시도:', id, password);
   if (!id||!password) return res.status(400).json({ error: '아이디와 비밀번호를 입력해주세요.' });
-  const { data: user } = await supabase.from('users').select('*').eq('id', id).single();
+  const { data: user, error: dbError } = await supabase.from('users').select('*').eq('id', id).single();
+  console.log('DB 조회 결과:', user ? '찾음' : '없음', dbError);
   if (!user||user.deleted) { await bcrypt.compare(password,'$2b$12$dummy'); return res.status(401).json({ error: '아이디 또는 비밀번호가 틀렸습니다.' }); }
   if (user.suspended) return res.status(403).json({ error: '정지된 계정입니다. 관리자에게 문의하세요.' });
   const ok = await bcrypt.compare(password, user.password);
+  console.log('bcrypt 비교 결과:', ok);
   if (!ok) return res.status(401).json({ error: '아이디 또는 비밀번호가 틀렸습니다.' });
   const token = jwt.sign({ id: user.id, role: user.role, name: user.name }, SECRET, { expiresIn: '1h' });
   const refreshToken = jwt.sign({ id: user.id }, REFRESH_SECRET, { expiresIn: '7d' });
