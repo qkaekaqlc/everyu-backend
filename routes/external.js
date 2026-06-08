@@ -377,7 +377,5 @@ router.get('/api/users/search-nickname', auth, async (req, res) => {
 });
 
 // ══ 에러 핸들러 (반드시 모든 라우트 뒤에 위치해야 함) ══
-app.use((req,res) => res.status(404).json({error:'존재하지 않는 API예요.'}));
-app.use((err,req,res,next) => { console.error(err); res.status(500).json({error:'서버 오류가 발생했어요.'}); });
 
 module.exports = router;
