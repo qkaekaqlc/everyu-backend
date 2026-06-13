@@ -267,7 +267,103 @@ router.post('/api/admin/notice', auth, adminOnly, rateLimit({ windowMs: 60*60*10
 // database.sql에서 아래 SQL 실행 필요:
 // alter table posts add column if not exists tags text[] default '{}';
 
-// ═══════════════════════════════════════════
-// Supabase Storage 파일 업로드
+// ══ 전국 중학교 일괄 동기화 (배치 처리) ══
+const fetch = (...args) => import('node-fetch').then(({default: f}) => f(...args));
+router.post('/api/admin/schools/sync', auth, adminOnly, async (req, res) => {
+  try {
+    let page = 1, total = 0, added = 0, skipped = 0;
+    const pageSize = 1000;
+    while (true) {
+      const url = `https://open.neis.go.kr/hub/schoolInfo?KEY=${NEIS_KEY}&Type=json&SCHUL_KND_SC_NM=중학교&pSize=${pageSize}&pIndex=${page}`;
+      const resp = await fetch(url);
+      const data = await resp.json();
+      const rows = data?.schoolInfo?.[1]?.row || [];
+      if (!rows.length) break;
+      total += rows.length;
+      const BATCH = 100;
+      for (let i = 0; i < rows.length; i += BATCH) {
+        const batch = rows.slice(i, i + BATCH).map(r => {
+          let nx = null, ny = null;
+          if (r.LTTUDE && r.LGTUDE) {
+            const grid = latLonToGrid(parseFloat(r.LTTUDE), parseFloat(r.LGTUDE));
+            nx = grid.nx; ny = grid.ny;
+          }
+          return { name: r.SCHUL_NM, office_code: r.ATPT_OFCDC_SC_CODE, school_code: r.SD_SCHUL_CODE, address: r.ORG_RDNMA || null, lat: r.LTTUDE ? parseFloat(r.LTTUDE) : null, lon: r.LGTUDE ? parseFloat(r.LGTUDE) : null, nx, ny, bus_stops: [] };
+        });
+        const { error } = await supabase.from('schools').upsert(batch, { onConflict: 'school_code', ignoreDuplicates: false });
+        if (error) skipped += batch.length;
+        else added += batch.length;
+      }
+      if (rows.length < pageSize) break;
+      page++;
+    }
+    res.json({ ok: true, total, added, skipped, message: `전국 중학교 ${added}개 동기화 완료!` });
+  } catch(e) { res.status(500).json({ error: '동기화 실패: ' + e.message }); }
+});
+
+// ══ 학교 관리 ══
+router.get('/api/schools', async (req, res) => {
+  const { data } = await supabase.from('schools').select('*').order('name');
+  res.json(data || []);
+});
+router.post('/api/schools', auth, adminOnly, async (req, res) => {
+  const { name, office_code, school_code, address, lat, lon, nx, ny, bus_stops } = req.body;
+  if (!name || !office_code || !school_code) return res.status(400).json({ error: '필수 항목이 없어요.' });
+  let calcNx = nx||null, calcNy = ny||null;
+  if (!calcNx && lat && lon) { const g = latLonToGrid(parseFloat(lat), parseFloat(lon)); calcNx = g.nx; calcNy = g.ny; }
+  const { data: exists } = await supabase.from('schools').select('id').eq('school_code', school_code).single();
+  if (exists) return res.status(400).json({ error: '이미 등록된 학교예요.' });
+  const { data, error } = await supabase.from('schools').insert({ name, office_code, school_code, address, lat: lat||null, lon: lon||null, nx: calcNx, ny: calcNy, bus_stops: bus_stops||[] }).select().single();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+router.put('/api/schools/:id', auth, adminOnly, async (req, res) => {
+  await supabase.from('schools').update(req.body).eq('id', req.params.id);
+  res.json({ ok: true });
+});
+router.delete('/api/schools/:id', auth, adminOnly, async (req, res) => {
+  await supabase.from('schools').delete().eq('id', req.params.id);
+  res.json({ ok: true });
+});
+router.post('/api/schools/auto-register', auth, async (req, res) => {
+  const { name, office_code, school_code, address, lat, lon, nx, ny } = req.body;
+  if (!name || !office_code || !school_code) return res.status(400).json({ error: '학교 정보가 없어요.' });
+  const { data: exists } = await supabase.from('schools').select('*').eq('school_code', school_code).single();
+  if (exists) return res.json(exists);
+  let calcNx = nx||null, calcNy = ny||null;
+  if (!calcNx && lat && lon) { const g = latLonToGrid(parseFloat(lat), parseFloat(lon)); calcNx = g.nx; calcNy = g.ny; }
+  const { data, error } = await supabase.from('schools').insert({ name, office_code, school_code, address, lat: lat||null, lon: lon||null, nx: calcNx, ny: calcNy, bus_stops: [] }).select().single();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+router.get('/api/schools/search', async (req, res) => {
+  const { q } = req.query;
+  if (!q || q.trim().length < 2) return res.status(400).json({ error: '2자 이상 입력해주세요.' });
+  try {
+    const url = `https://open.neis.go.kr/hub/schoolInfo?KEY=${NEIS_KEY}&Type=json&SCHUL_NM=${encodeURIComponent(q)}&SCHUL_KND_SC_NM=중학교`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+    const rows = data?.schoolInfo?.[1]?.row || [];
+    res.json(rows.map(r => {
+      let nx = null, ny = null;
+      if (r.LTTUDE && r.LGTUDE) { const g = latLonToGrid(parseFloat(r.LTTUDE), parseFloat(r.LGTUDE)); nx = g.nx; ny = g.ny; }
+      return { name: r.SCHUL_NM, officeCode: r.ATPT_OFCDC_SC_CODE, schoolCode: r.SD_SCHUL_CODE, address: r.ORG_RDNMA, lat: r.LTTUDE ? parseFloat(r.LTTUDE) : null, lon: r.LGTUDE ? parseFloat(r.LGTUDE) : null, nx, ny };
+    }));
+  } catch(e) { res.status(500).json({ error: '학교 검색에 실패했어요.' }); }
+});
+router.put('/api/profile/school', auth, async (req, res) => {
+  const { school_id } = req.body;
+  if (!school_id) return res.status(400).json({ error: '학교를 선택해주세요.' });
+  const { data: school } = await supabase.from('schools').select('*').eq('id', school_id).single();
+  if (!school) return res.status(404).json({ error: '학교를 찾을 수 없어요.' });
+  await supabase.from('users').update({ school_id }).eq('id', req.user.id);
+  res.json({ ok: true, school });
+});
+router.get('/api/users/search-nickname', auth, async (req, res) => {
+  const { q } = req.query;
+  if (!q) return res.json([]);
+  const { data } = await supabase.from('users').select('id,nickname,avatar').ilike('nickname', `${q}%`).eq('deleted', false).not('nickname', 'is', null).neq('id', req.user.id).limit(8);
+  res.json((data||[]).map(u => ({ id: u.id, nickname: u.nickname, avatar: u.avatar })));
+});
 
 module.exports = router;
